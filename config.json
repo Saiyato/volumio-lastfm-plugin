@@ -31,6 +31,10 @@
     "type": "boolean",
     "value": false
   },
+  "webradioScrobbleThreshold": {
+    "type": "string",
+    "value": "30"
+  },
   "scrobbleLMS": {
     "type": "boolean",
     "value": false
