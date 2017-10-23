@@ -113,7 +113,6 @@
 			  "element": "switch",
 			  "label": "TRANSLATE.LASTFM.SCROBBLE_WEBRADIO",
 			  "doc": "TRANSLATE.LASTFM.D_SCROBBLE_WEBRADIO",
-			  "description": "Not yet supported!",
 			  "value": false
 			},
 			{
@@ -122,7 +121,6 @@
 				"element": "input",
 				"label": "TRANSLATE.LASTFM.WEBRADIOSCROBBLETHRESHOLD",
 				"doc": "TRANSLATE.LASTFM.D_WEBRADIOSCROBBLETHRESHOLD",
-				"description": "Not yet supported!",
 				"value": "30",
 				"visibleIf": {
 					"field": "tryScrobbleWebradio",
