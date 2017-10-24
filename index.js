@@ -14,7 +14,6 @@ var io = require('socket.io-client');
 var socket = io.connect('http://localhost:3000');
 var lastfm = require("simple-lastfm");
 var crypto = require('crypto');
-var previousScrobble = null;
 
 // Define the ControllerLastFM class
 module.exports = ControllerLastFM;
@@ -30,6 +29,12 @@ function ControllerLastFM(context)
 	this.commandRouter = this.context.coreCommand;
 	this.logger = this.context.logger;
 	this.configManager = this.context.configManager;
+	this.previousScrobble = 
+		{	artist: '',
+			title: '',
+			scrobbleTime: 0
+		};
+	this.memoryTimer;
 };
 
 ControllerLastFM.prototype.onVolumioStart = function()
@@ -58,7 +63,7 @@ ControllerLastFM.prototype.onVolumioStart = function()
 		}
 		
 		var scrobbleThresholdInMilliseconds = 0;
-		if(state.service == 'mpd')
+		if(state.service == 'mpd' || state.service == 'airplay')
 			scrobbleThresholdInMilliseconds = state.duration * (self.config.get('scrobbleThreshold') / 100) * 1000;
 		else if (state.service == 'webradio')
 			scrobbleThresholdInMilliseconds = self.config.get('webradioScrobbleThreshold') * 1000;
@@ -80,9 +85,9 @@ ControllerLastFM.prototype.onVolumioStart = function()
 		if(self.config.get('enable_debug_logging'))
 			self.logger.info('--------------------------------------------------------------------// [LastFM] new state has been pushed; status: ' + state.status + ' | service: ' + state.service + ' | duration: ' + state.duration + ' | title: ' + state.title + ' | previous title: ' + previousTitle + init);
 		
-		if (state.status == 'play' && (state.service == 'mpd' || (state.service == 'webradio' && self.config.get('tryScrobbleWebradio'))))
+		if (state.status == 'play' && (state.service == 'mpd' || state.service == 'airplay' || (state.service == 'webradio' && self.config.get('tryScrobbleWebradio'))))
 		{					
-			if((self.previousState.artist == state.artist) && (self.previousState.title == state.title) && ((self.previousState.status == 'pause' || self.previousState == 'stop') || initialize) || (self.currentTimer && !self.currentTimer.isPaused()))
+			if((self.previousState.artist == state.artist) && (self.previousState.title == state.title) && ((self.previousState.status == 'pause' || self.previousState == 'stop') || initialize) || (self.currentTimer && !self.currentTimer.isPaused()) && (self.previousScrobble.artist != state.artist && self.previousScrobble.title != state.title))
 			{
 				if(self.config.get('enable_debug_logging'))
 					self.logger.info('[LastFM] artist and song are (still) the same; but not necessarily no update.');
@@ -105,23 +110,29 @@ ControllerLastFM.prototype.onVolumioStart = function()
 							if(self.config.get('enable_debug_logging'))
 								self.logger.info('[LastFM] scrobbling from restarted timer.');
 							self.scrobble(state, self.config.get('scrobbleThreshold'), scrobbleThresholdInMilliseconds);
+							self.currentTimer.stop();
 							self.playTime = 0;
 						});
 					}
 					else
 					{
-						if(self.config.get('enable_debug_logging'))
+						if(scrobbleThresholdInMilliseconds > 0)
 						{
-							self.logger.info('[LastFM] starting new timer for ' + scrobbleThresholdInMilliseconds + ' milliseconds [' + state.artist + ' - ' + state.title + '].');
-							if(scrobbleThresholdInMilliseconds == undefined || scrobbleThresholdInMilliseconds == 0)
+							if(self.config.get('enable_debug_logging'))
+								self.logger.info('[LastFM] starting new timer for ' + scrobbleThresholdInMilliseconds + ' milliseconds [' + state.artist + ' - ' + state.title + '].');
+							
+							self.currentTimer.stop();
+							self.currentTimer.start(scrobbleThresholdInMilliseconds, function(scrobbler){							
+								self.scrobble(state, self.config.get('scrobbleThreshold'), scrobbleThresholdInMilliseconds);
+								self.currentTimer.stop();
+								self.playTime = 0;
+							});
+						}
+						else
+						{
+							if(self.config.get('enable_debug_logging'))
 								self.logger.info('[LastFM] can not scrobble; state object: ' + JSON.stringify(state));
 						}
-						
-						self.currentTimer.stop();
-						self.currentTimer.start(scrobbleThresholdInMilliseconds, function(scrobbler){							
-							self.scrobble(state, self.config.get('scrobbleThreshold'), scrobbleThresholdInMilliseconds);
-							self.playTime = 0;
-						});
 					}
 				}
 				else if (state.duration == 0 && state.service == 'webradio')
@@ -132,6 +143,7 @@ ControllerLastFM.prototype.onVolumioStart = function()
 					self.currentTimer.stop();
 					self.currentTimer.start(scrobbleThresholdInMilliseconds, function(scrobbler){							
 						self.scrobble(state, self.config.get('scrobbleThreshold'), scrobbleThresholdInMilliseconds);
+						self.currentTimer.stop();
 						self.playTime = 0;
 					});
 				}
@@ -149,6 +161,9 @@ ControllerLastFM.prototype.onVolumioStart = function()
 				
 				self.updateNowPlaying(state);
 
+				if(self.config.get('enable_debug_logging'))
+					self.logger.info('[LastFM] timer is counting: ' + self.currentTimer.isCounting());
+				
 				if(state.duration > 0 && (self.currentTimer && !self.currentTimer.isCounting()))
 				{
 					if(self.config.get('enable_debug_logging'))
@@ -158,8 +173,10 @@ ControllerLastFM.prototype.onVolumioStart = function()
 							self.logger.info('[LastFM] state object: ' + JSON.stringify(state));
 					}
 					
+					self.currentTimer.stop();
 					self.currentTimer.start(scrobbleThresholdInMilliseconds, function(scrobbler){							
 						self.scrobble(state, self.config.get('scrobbleThreshold'), scrobbleThresholdInMilliseconds);
+						self.currentTimer.stop();
 						self.playTime = 0;
 					});
 					
@@ -174,6 +191,7 @@ ControllerLastFM.prototype.onVolumioStart = function()
 					self.currentTimer.stop();
 					self.currentTimer.start(scrobbleThresholdInMilliseconds, function(scrobbler){							
 						self.scrobble(state, self.config.get('scrobbleThreshold'), scrobbleThresholdInMilliseconds);
+						self.currentTimer.stop();
 						self.playTime = 0;
 					});
 				}
@@ -506,6 +524,7 @@ ControllerLastFM.prototype.scrobble = function (state, scrobbleThreshold, scrobb
 	var self = this;
 	var defer=libQ.defer();
 	
+	var now = new Date().getTime();
 	var artist = state.artist;
 	var title = state.title;
 	var album = state.album;
@@ -518,6 +537,12 @@ ControllerLastFM.prototype.scrobble = function (state, scrobbleThreshold, scrobb
 		album = '';
 	}
 	
+	if(self.config.get('enable_debug_logging'))
+	{
+		self.logger.info('[LastFM] checking previously scrobbled song...');
+		self.logger.info('[LastFM] previous scrobble: ' + JSON.stringify(self.previousScrobble));
+	}
+		
 	if (
 		(self.config.get('API_KEY') != '') &&
 		(self.config.get('API_SECRET') != '') &&
@@ -525,8 +550,7 @@ ControllerLastFM.prototype.scrobble = function (state, scrobbleThreshold, scrobb
 		(self.config.get('authToken') != '') &&
 		artist != undefined &&
 		title != undefined &&
-		album != undefined &&
-		(previousScrobble == null || (previousScrobble.artist != state.artist && previousScrobble.title != state.title && (state.duration * (scrobbleThreshold / 100 ) * 1000) != scrobbleThresholdInMilliseconds && (previousScrobble.scrobbleDate < (new Date().getTime() - scrobbleThresholdInMilliseconds))))
+		album != undefined	
 	)
 	{
 		if(self.config.get('enable_debug_logging'))
@@ -591,16 +615,17 @@ ControllerLastFM.prototype.scrobble = function (state, scrobbleThreshold, scrobb
 							self.commandRouter.pushToastMessage('success', 'Scrobble succesful', 'Scrobbled: ' + artist + ' - ' + title + ' (' + album + ').');
 						self.logger.info('[LastFM] Scrobble successful for: ' + artist + ' - ' + title + ' (' + album + ').');
 					}
-				});				
-				previousScrobble.artist = artist;
-				previousScrobble.title = title;
-				previousScrobble.scrobbleDate = new Date().getTime();
+				});	
 			}
 			else
 			{
 				self.logger.info("[LastFM] Error: " + result.error);
 			}
 		});
+		
+		self.previousScrobble.artist = artist;
+		self.previousScrobble.title = title;
+		self.clearScrobbleMemory((state.duration * 1000) - scrobbleThresholdInMilliseconds);
 	}
 	else
 	{
@@ -621,6 +646,17 @@ ControllerLastFM.prototype.scrobble = function (state, scrobbleThreshold, scrobb
 
 function md5(string) {
 	return crypto.createHash('md5').update(string, 'utf8').digest("hex");
+}
+
+ControllerLastFM.prototype.clearScrobbleMemory = function (remainingPlaytime)
+{
+	var self = this;
+	self.memoryTimer = setInterval(function(clear)
+	{
+		self.previousScrobble.artist = '';
+		self.previousScrobble.title = '';
+	}
+	, remainingPlaytime);
 }
 
 /*
