@@ -330,8 +330,6 @@ ControllerLastFM.prototype.getUIConfig = function() {
 		uiconf.sections[1].content[1].value = self.config.get('pushToastOnScrobble');
 		uiconf.sections[1].content[2].value = self.config.get('tryScrobbleWebradio');
 		uiconf.sections[1].content[3].value = self.config.get('webradioScrobbleThreshold');
-		uiconf.sections[1].content[4].value = self.config.get('scrobbleLMS');
-		uiconf.sections[1].content[5].value = self.config.get('LMS_server');
 		self.logger.info("2/3 settings loaded");
 		
 		uiconf.sections[2].content[0].value = self.config.get('enable_debug_logging');
@@ -400,8 +398,6 @@ ControllerLastFM.prototype.updateScrobbleSettings = function (data)
 	self.config.set('pushToastOnScrobble', data['pushToastOnScrobble']);
 	self.config.set('tryScrobbleWebradio', data['tryScrobbleWebradio']);
 	self.config.set('webradioScrobbleThreshold', data['webradioScrobbleThreshold']);
-	self.config.set('scrobbleLMS', data['scrobbleLMS']);
-	self.config.set('LMS_server', data['LMS_server']);
 	defer.resolve();
 	
 	self.commandRouter.pushToastMessage('success', "Saved settings", "Successfully saved scrobble settings.");
