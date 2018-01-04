@@ -203,7 +203,11 @@ ControllerLastFM.prototype.onVolumioStart = function()
 				// Airplay fix, the duration is propagated at a later point in time
 				var addition = (state.duration - self.previousState.duration) * (self.config.get('scrobbleThreshold') / 100) * 1000;
 				self.logger.info('[LastFM] updating timer, previous duration is obsolete; adding ' + addition + ' milliseconds.');
-				self.currentTimer.addMilliseconds(addition);				
+				self.currentTimer.addMilliseconds(addition, function(scrobbler){							
+						self.scrobble(state, self.config.get('scrobbleThreshold'), scrobbleThresholdInMilliseconds);
+						self.currentTimer.stop();
+						self.playTime = 0;
+					});				
 			}
 			else
 			{
