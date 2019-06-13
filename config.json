@@ -19,9 +19,17 @@
     "type": "string",
     "value": ""
   },
+  "songServices": {
+    "type": "string",
+    "value": "mpd,airplay,spop,volspotconnect,volspotconnect2,80s80s,radio_paradise"
+  },
+  "extractFromTitle": {
+    "type": "string",
+    "value": "80s80s,radio_paradise"
+  },
   "scrobbleThreshold": {
     "type": "int",
-    "value": 75
+    "value": "75"
   },
   "pushToastOnScrobble": {
     "type": "boolean",
@@ -29,7 +37,7 @@
   },
   "scrobbleFromStream": {
     "type": "boolean",
-    "value": false
+    "value": true
   },
   "streamScrobbleThreshold": {
     "type": "string",
@@ -37,6 +45,6 @@
   },
   "enable_debug_logging": {
     "type": "boolean",
-    "value": false
+    "value": true
   }
 }
