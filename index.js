@@ -1,20 +1,22 @@
 'use strict';
 
-var libQ = require('kew');
-var libNet = require('net');
-var fs = require('fs-extra');
 var config = new (require('v-conf'))();
-var exec = require('child_process').exec;
-var net = require('net');
-var os = require('os');
+var crypto = require('crypto');
 var currentMac = '';
-var pTimer = require('./pausableTimer');
-
+var exec = require('child_process').exec;
+var fs = require('fs-extra');
 var http = require('http');
 var io = require('socket.io-client');
+var pTimer = require('./pausableTimer');
 var socket = io.connect('http://localhost:3000');
 var lastfm = require("simple-lastfm");
-var crypto = require('crypto');
+var libNet = require('net');
+var libQ = require('kew');
+var net = require('net');
+var os = require('os');
+
+var supportedSongServices; // = ["mpd", "airplay", "volspotconnect", "volspotconnect2", "spop", "radio_paradise", "80s80s"];
+var supportedStreamingServices; // = ["webradio"];
 
 // Define the ControllerLastFM class
 module.exports = ControllerLastFM;
@@ -26,16 +28,23 @@ function ControllerLastFM(context)
 	self.updatingNowPlaying = false;
 	self.timeToPlay = 0;
 	self.apiResponse = null;
+	self.previousScrobble = 
+		{	artist: '',
+			title: '',
+			scrobbleTime: 0
+		};
+	self.scrobbleData =
+	{
+		artist: '',
+		title: '',
+		album: ''
+	};
 	
 	this.context = context;
 	this.commandRouter = this.context.coreCommand;
 	this.logger = this.context.logger;
 	this.configManager = this.context.configManager;
-	this.previousScrobble = 
-		{	artist: '',
-			title: '',
-			scrobbleTime: 0
-		};
+	
 	this.memoryTimer;
 };
 
@@ -45,13 +54,16 @@ ControllerLastFM.prototype.onVolumioStart = function()
 	var initialize = false;
 	this.configFile = this.commandRouter.pluginManager.getConfigurationFile(this.context, 'config.json');
 	self.getConf(this.configFile);
+	supportedSongServices = self.config.get('supportedSongServices').split(',');
+	supportedStreamingServices = self.config.get('supportedStreamingServices').split(',');
 	
 	self.logger.info('[LastFM] scrobbler initiated!');
 	self.logger.info('[LastFM] extended logging: ' + self.config.get('enable_debug_logging'));
-	self.logger.info('[LastFM] try scrobble radio plays: ' + self.config.get('tryScrobbleWebradio'));
+	self.logger.info('[LastFM] try scrobble stream/radio plays: ' + self.config.get('scrobbleFromStream'));
 	self.currentTimer = new pTimer(self.context, self.config.get('enable_debug_logging'));
 	
 	socket.on('pushState', function (state) {
+		// Create the timer object
 		if(!self.currentTimer)
 		{
 			self.currentTimer = new pTimer(self.context, self.config.get('enable_debug_logging'));
@@ -61,24 +73,19 @@ ControllerLastFM.prototype.onVolumioStart = function()
 		else
 		{
 			if(self.config.get('enable_debug_logging'))
-				self.logger.info('[LastFM] timer should be there... using the existing instance');
+				self.logger.info('[LastFM] using existing timer');
 		}
 		
 		var scrobbleThresholdInMilliseconds = 0;
-		if(state.service == 'mpd' || state.service == 'airplay' || state.service == 'volspotconnect2')
+		if(supportedSongServices.indexOf(state.service) != -1)
 			scrobbleThresholdInMilliseconds = state.duration * (self.config.get('scrobbleThreshold') / 100) * 1000;
-		else if (state.service == 'webradio')
-			scrobbleThresholdInMilliseconds = self.config.get('webradioScrobbleThreshold') * 1000;
-		
-		var previousTitle = 'null';
-		if(self.previousState != null && self.previousState.title != null)
-			previousTitle = self.previousState.title;
-		
+		if(supportedStreamingServices.indexOf(state.service) != -1)
+			scrobbleThresholdInMilliseconds = self.config.get('streamScrobbleThreshold') * 1000;
+				
 		// Set initial previousState object
 		var init = '';
 		if(self.previousState == null)
 		{
-			self.logger.info('[LastFM] initializing previous state object.');
 			self.previousState = state;
 			initialize = true;
 			init = ' | Initializing: true';
@@ -86,52 +93,58 @@ ControllerLastFM.prototype.onVolumioStart = function()
 		
 		if(self.config.get('enable_debug_logging'))
 		{
-			self.logger.info('--------------------------------------------------------------------// [LastFM] new state has been pushed; status: ' + state.status + ' | service: ' + state.service + ' | duration: ' + state.duration + ' | title: ' + state.title + ' | previous title: ' + previousTitle + init);
+			self.logger.info('--------------------------------------------------------------------// [LastFM] new state has been pushed; status: ' + state.status + ' | service: ' + state.service + ' | duration: ' + state.duration + ' | title: ' + state.title + ' | previous title: ' + self.previousState.title + init);
 			if(self.currentTimer)
 				self.logger.info('=================> [timer] is active: ' + self.currentTimer.isActive + ' | can continue: ' + self.currentTimer.canContinue + ' | timer started at: ' + self.currentTimer.timerStarted);
 		}
 		
-		if (state.status == 'play' && (state.service == 'mpd' || state.service == 'airplay' || state.service == 'volspotconnect2' || (state.service == 'webradio' && self.config.get('tryScrobbleWebradio'))))
-		{		
-			if((self.previousState.artist == state.artist) && (self.previousState.title == state.title) && ((self.previousState.status == 'pause' || self.previousState == 'stop') || initialize) || (self.currentTimer && !self.currentTimer.isPaused()) && (self.previousScrobble.artist != state.artist && self.previousScrobble.title != state.title))
+		self.formatScrobbleData(state);
+		
+		// Scrobble from all services, or at least try to -> improves forward compatibility
+		if(state.status == 'play')
+		{
+			if(self.config.get('enable_debug_logging'))
+				self.logger.info('Playback detected, evaluating parameters for scrobbling...');
+			
+			// Always (try to) update 'now playing'
+			self.updateNowPlaying(state);
+			
+			/* 
+				Either same song and previously stopped/paused
+				Or different song (artist or title differs)
+			*/
+			if
+			(
+				(self.previousState.artist == state.artist && self.previousState.title == state.title && ((self.previousState.status == 'pause' || self.previousState.status == 'stop') || initialize || (self.previousState.duration != state.duration))) 
+				|| (self.currentTimer && !self.currentTimer.isActive && (self.previousScrobble.artist != state.artist || self.previousScrobble.title != state.title))
+			)
 			{
 				if(self.config.get('enable_debug_logging'))
-					self.logger.info('[LastFM] artist and song are (still) the same; but not necessarily no update.');
-				
-				// Still the same song, but different status; continue timer is applicable, else start a new one | or the previousState has not yet been initialized.
-				self.updateNowPlaying(state);
+					self.logger.info('[LastFM] Continuing playback or different song.');
+								
+				// Song service, since duration is > 0
 				if(state.duration > 0)
 				{
 					if(self.config.get('enable_debug_logging'))
 						self.logger.info('[LastFM] timeToPlay for current track: ' + self.timeToPlay);
-				
+					
+					// Continuing playback, timeToPlay was populated
 					if(self.timeToPlay > 0)
 					{
 						if(self.config.get('enable_debug_logging'))
 							self.logger.info('[LastFM] Continuing scrobble, starting new timer for the remainder of ' + self.timeToPlay + ' milliseconds [' + state.artist + ' - ' + state.title + '].');
 						
-						self.currentTimer.stop();
-						self.currentTimer.start(self.timeToPlay, function(scrobbler){
-							if(self.config.get('enable_debug_logging'))
-								self.logger.info('[LastFM] scrobbling from restarted timer.');
-							self.scrobble(state, self.config.get('scrobbleThreshold'), scrobbleThresholdInMilliseconds);
-							self.currentTimer.stop();
-							self.timeToPlay = 0;
-						});
-					}
+						self.stopAndStartTimer(self.timeToPlay, state, scrobbleThresholdInMilliseconds);
+					}					
 					else
 					{
+						// Create a new timer
 						if(scrobbleThresholdInMilliseconds > 0)
 						{
 							if(self.config.get('enable_debug_logging'))
 								self.logger.info('[LastFM] starting new timer for ' + scrobbleThresholdInMilliseconds + ' milliseconds [' + state.artist + ' - ' + state.title + '].');
-							
-							self.currentTimer.stop();
-							self.currentTimer.start(scrobbleThresholdInMilliseconds, function(scrobbler){							
-								self.scrobble(state, self.config.get('scrobbleThreshold'), scrobbleThresholdInMilliseconds);
-								self.currentTimer.stop();
-								self.timeToPlay = 0;
-							});
+								
+							self.stopAndStartTimer(scrobbleThresholdInMilliseconds, state, scrobbleThresholdInMilliseconds);
 						}
 						else
 						{
@@ -145,65 +158,13 @@ ControllerLastFM.prototype.onVolumioStart = function()
 					if(self.config.get('enable_debug_logging'))
 						self.logger.info('[LastFM] starting new timer for ' + scrobbleThresholdInMilliseconds + ' milliseconds [webradio: ' + state.title + '].');
 					
-					self.currentTimer.stop();
-					self.currentTimer.start(scrobbleThresholdInMilliseconds, function(scrobbler){							
-						self.scrobble(state, self.config.get('scrobbleThreshold'), scrobbleThresholdInMilliseconds);
-						self.currentTimer.stop();
-						self.timeToPlay = 0;
-					});
+					self.stopAndStartTimer(scrobbleThresholdInMilliseconds, state, scrobbleThresholdInMilliseconds);
 				}
 				
 				if(initialize)
 						initialize = false;
 			}
-			else if (self.previousState.title == null || self.previousState.title != state.title)
-			{
-				// Scrobble new song
-				// self.logger.info('[LastFM] previous state: ' + JSON.stringify(self.previousState));
-				// self.logger.info('[LastFM] current state: ' + JSON.stringify(state));
-				if(self.config.get('enable_debug_logging'))
-					self.logger.info('[LastFM] previous title does not match current title, evaluating timer settings...');
-				
-				self.updateNowPlaying(state);
-
-				if(self.config.get('enable_debug_logging'))
-					self.logger.info('[LastFM] timer is counting: ' + self.currentTimer.isCounting());
-				
-				if(state.duration > 0 && (self.currentTimer && !self.currentTimer.isCounting()))
-				{
-					if(self.config.get('enable_debug_logging'))
-					{
-						self.logger.info('[LastFM] starting new timer for ' + scrobbleThresholdInMilliseconds + ' milliseconds [' + state.artist + ' - ' + state.title + '].');
-						if(scrobbleThresholdInMilliseconds == undefined || scrobbleThresholdInMilliseconds == 0)
-							self.logger.info('[LastFM] state object: ' + JSON.stringify(state));
-					}
-					
-					self.currentTimer.stop();
-					self.currentTimer.start(scrobbleThresholdInMilliseconds, function(scrobbler){							
-						self.scrobble(state, self.config.get('scrobbleThreshold'), scrobbleThresholdInMilliseconds);
-						self.currentTimer.stop();
-						self.timeToPlay = 0;
-					});
-					
-					if(initialize)
-						initialize = false;
-				}
-				else if (state.duration == 0 && state.service == 'webradio')
-				{
-					if(self.config.get('enable_debug_logging'))
-						self.logger.info('[LastFM] starting new timer for ' + scrobbleThresholdInMilliseconds + ' milliseconds [webradio: ' + state.title + '].');
-					
-					self.currentTimer.stop();
-					self.currentTimer.start(scrobbleThresholdInMilliseconds, function(scrobbler){							
-						self.scrobble(state, self.config.get('scrobbleThreshold'), scrobbleThresholdInMilliseconds);
-						self.currentTimer.stop();
-						self.timeToPlay = 0;
-					});
-				}
-				else
-					self.logger.info('[LastFM] duration is 0, ignoring status update for [' + state.artist + ' - ' + state.title + ']');
-			}
-			else if (self.previousState.artist == state.artist && self.previousState.title == state.title && self.previousState.duration != state.duration && self.currentTimer.isCounting())
+			else if (self.previousState.artist == state.artist && self.previousState.title == state.title && self.previousState.duration != state.duration && !self.currentTimer.isActive)
 			{
 				// Airplay fix, the duration is propagated at a later point in time
 				var addition = (state.duration - self.previousState.duration) * (self.config.get('scrobbleThreshold') / 100) * 1000;
@@ -214,16 +175,22 @@ ControllerLastFM.prototype.onVolumioStart = function()
 						self.timeToPlay = 0;
 					});				
 			}
+			else if (self.previousState.artist == state.artist && self.previousState.title == state.title && self.previousState.duration == state.duration)
+			{
+				// Just a state update, no action necessary
+				if(self.config.get('enable_debug_logging'))
+					self.logger.info('[LastFM] same state, different update... no action required.');
+			}
 			else
 			{
 				if(self.config.get('enable_debug_logging'))
-						self.logger.info('[LastFM] could not process current state: ' + JSON.stringify(state));
+					self.logger.info('[LastFM] could not process current state: ' + JSON.stringify(state));
 			}
 			// else = multiple pushStates without change, ignoring them
 		}
 		else if (state.status == 'pause')
 		{
-			if(self.currentTimer.isCounting())
+			if(self.currentTimer.isActive)
 			{
 				self.timeToPlay = self.currentTimer.pause();
 				self.previousState = state;
@@ -234,7 +201,7 @@ ControllerLastFM.prototype.onVolumioStart = function()
 			if(self.config.get('enable_debug_logging'))
 				self.logger.info('[LastFM] stopping timer, song has ended.');
 			
-			if(self.currentTimer.isCounting())
+			if(self.currentTimer.isActive)
 			{
 				self.currentTimer.stop();
 				self.previousState = state;
@@ -254,6 +221,7 @@ ControllerLastFM.prototype.getConfigurationFiles = function()
 };
 
 // Plugin methods -----------------------------------------------------------------------------
+
 ControllerLastFM.prototype.onStop = function() {
 	var self = this;
 	self.logger.info("Performing onStop action");
@@ -301,8 +269,6 @@ ControllerLastFM.prototype.getUIConfig = function() {
 	self.getConf(this.configFile);
 	self.logger.info("Loaded the previous config.");
 	
-	self.generateDependencylist();
-	
 	var thresholds = fs.readJsonSync((__dirname + '/options/thresholds.json'),  'utf8', {throws: false});
 	
 	self.commandRouter.i18nJson(__dirname+'/i18n/strings_' + lang_code + '.json',
@@ -323,6 +289,7 @@ ControllerLastFM.prototype.getUIConfig = function() {
 		self.logger.info("1/3 settings loaded");
 		
 		// Scrobble settings
+		uiconf.sections[1].content[0].value = self.config.get('supportedSongServices');
 		for (var n = 0; n < thresholds.percentages.length; n++){
 			self.configManager.pushUIConfigParam(uiconf, 'sections[1].content[0].options', {
 				value: thresholds.percentages[n].perc,
@@ -331,13 +298,14 @@ ControllerLastFM.prototype.getUIConfig = function() {
 			
 			if(thresholds.percentages[n].perc == parseInt(self.config.get('scrobbleThreshold')))
 			{
-				uiconf.sections[1].content[0].value.value = thresholds.percentages[n].perc;
-				uiconf.sections[1].content[0].value.label = thresholds.percentages[n].desc;
+				uiconf.sections[1].content[1].value.value = thresholds.percentages[n].perc;
+				uiconf.sections[1].content[1].value.label = thresholds.percentages[n].desc;
 			}
 		}
-		uiconf.sections[1].content[1].value = self.config.get('pushToastOnScrobble');
-		uiconf.sections[1].content[2].value = self.config.get('tryScrobbleWebradio');
-		uiconf.sections[1].content[3].value = self.config.get('webradioScrobbleThreshold');
+		uiconf.sections[1].content[2].value = self.config.get('pushToastOnScrobble');
+		uiconf.sections[1].content[3].value = self.config.get('scrobbleFromStream');
+		uiconf.sections[1].content[4].value = self.config.get('supportedStreamingServices');
+		uiconf.sections[1].content[5].value = self.config.get('streamScrobbleThreshold');
 		self.logger.info("2/3 settings loaded");
 		
 		uiconf.sections[2].content[0].value = self.config.get('enable_debug_logging');
@@ -384,7 +352,7 @@ ControllerLastFM.prototype.addToBrowseSources = function () {
 		plugin_type: 'miscellanea', 
 		plugin_name: 'lastfm',
 		icon: 'fa fa-lastfm',
-		albumart: '/albumart?sourceicon=miscellanea/lastfm/lastfm.svg'
+		albumart: '/albumart?sourceicon=miscellanea/lastfm/lastfm_fill.svg'
 		};
     this.commandRouter.volumioAddToBrowseSources(data);
 };
@@ -398,10 +366,10 @@ ControllerLastFM.prototype.handleBrowseUri = function (curUri) {
 	else if (curUri.startsWith('lastfm')) {
         self.logger.info('[LastFM] browsing to: ' + curUri);
 		
-		if(1=1)
-			response = self.getSimilarArtists(curUri);
-		else if (1=2)
-			response = self.getSimilarArtists(curUri);
+		if(curUri == 'lastfm/similar_artist')
+			response = self.getSimilarArtists('similar_artist');
+		else if (curUri == 'lastfm/similar_tracks')
+			response = self.getSimilarTracks('similar_tracks');
     }
     return response
         .fail(function (e) {
@@ -413,8 +381,8 @@ ControllerLastFM.prototype.handleBrowseUri = function (curUri) {
 ControllerLastFM.prototype.browseRoot = function(uri) {
   var self = this;
   self.fTree = [ 
-		{ label: 'Similar Artists', uri: 'similar_artist'},
-		{ label: 'Similar Tracks', uri: 'similar_tracks'}
+		{ label: 'Similar Artists', uri: 'similar_artist', icon: 'fa fa-users'},
+		{ label: 'Similar Tracks', uri: 'similar_tracks', icon: 'fa file-audio'}
 	];
   var defer = libQ.defer();
 
@@ -443,25 +411,27 @@ ControllerLastFM.prototype.browseRoot = function(uri) {
       title: self.fTree[f].label,
       artist: '',
       album: '',
-      icon: 'fa fa-lastfm',
+      icon: self.fTree[f].icon,
 	  albumart: '',
       uri: 'lastfm/' + self.fTree[f].uri,
     });
   }
-
   defer.resolve(rootTree);
+    
   return defer.promise;
 };
+
+// Handle browse events----------------------------------------------------------------------------------
 
 ControllerLastFM.prototype.getSimilarArtists = function(uri) {
 	var self = this;
 	var defer = libQ.defer();
+	var artworkURL = 'https://lastfm-img2.akamaized.net/i/u/300x300/2a96cbd8b46e442fc41c2b86b821562f.png';
   
-	var call = self.apiCall('', '');
+	var call = self.apiCall('artist.getsimilar', self.scrobbleData);
 	call.then(function(response){
 		
 		var jsonResp = JSON.parse(response);
-		
 		var rootTree = 
 		{
 			navigation: {
@@ -473,29 +443,63 @@ ControllerLastFM.prototype.getSimilarArtists = function(uri) {
 					items: [],
 				}],
 				prev: {
-					uri: 'lastfm/',
+					uri: 'lastfm',
 				},
 			},
 		};
 		
-		for (var art in jsonResp.similarartists.artist)
-		{	
-			rootTree.navigation.lists[0].items.push({
-				service: 'lastfm',
-				type: 'artist',
-				title: '',
-				artist: jsonResp.similarartists.artist[art].name,
-				albumart: jsonResp.similarartists.artist[art].image[3]['#text'],
-				uri: '',
-			});
-		}
-		
-		self.logger.info('[LastFM] items: ' + JSON.stringify(rootTree.navigation.lists[0].items));
-		defer.resolve(rootTree);
+		self.checkURL('donotenable')
+		.then(function(artworkProviderOnline)
+		{
+			for (var art in jsonResp.similarartists.artist)
+			{
+				if(artworkProviderOnline)
+				{
+					// This part is not working correctly just yet, might need some rework					
+					var call = self.fetchArtwork(jsonResp.similarartists.artist[art].mbid);
+					call.then(function(fanartData)
+					{
+						if(self.config.get('enable_debug_logging'))
+							self.logger.info('[LastFM] Artwork response: ' + JSON.stringify(fanartData));
+						if(fanartData.artistthumb[0].url != undefined || fanartData.artistthumb[0].url != '')
+							defer.resolve(fanartData.artistthumb[0].url);
+					})
+					.then(function(applyArtwork)
+					{
+						rootTree.navigation.lists[0].items.push({
+							service: 'lastfm',
+							type: 'artistinfo',
+							title: '',
+							artist: jsonResp.similarartists.artist[art].name,
+							mbid: jsonResp.similarartists.artist[art].mbid,
+							albumart: jsonResp.similarartists.artist[art].image[3]['#text'],
+							uri: "search/any/" + jsonResp.similarartists.artist[art].name,
+						});
+					});
+				}
+				else
+				{
+					rootTree.navigation.lists[0].items.push({
+						service: 'lastfm',
+						type: 'artistinfo',
+						title: '',
+						artist: jsonResp.similarartists.artist[art].name,
+						mbid: jsonResp.similarartists.artist[art].mbid,
+						albumart: artworkURL,
+						uri: "search/any/" + jsonResp.similarartists.artist[art].name,
+					});
+				}
+			}
+		})
+		.then(function(resolveInfo)
+		{
+			self.logger.info('[LastFM] items: ' + JSON.stringify(rootTree.navigation.lists[0].items));
+			defer.resolve(rootTree);
+		});
 	})
 	.fail(function()
 	{
-		defer.fail(new Error('An error occurred while listing playlists'));
+		defer.reject(new Error('An error occurred while listing similar artists'));
 	});
 	
 	return defer.promise;
@@ -505,7 +509,7 @@ ControllerLastFM.prototype.getSimilarTracks = function(uri) {
 	var self = this;
 	var defer = libQ.defer();
   
-	var call = self.apiCall('track.getsimilar', '');
+	var call = self.apiCall('track.getsimilar', self.scrobbleData);
 	call.then(function(response){
 		
 		var jsonResp = JSON.parse(response);
@@ -521,20 +525,24 @@ ControllerLastFM.prototype.getSimilarTracks = function(uri) {
 					items: [],
 				}],
 				prev: {
-					uri: 'lastfm/',
+					uri: 'lastfm',
 				},
 			},
 		};
 		
-		for (var art in jsonResp.similarartists.artist)
+		if(jsonResp.similartracks.track.length < 1)
+			self.commandRouter.pushToastMessage('info', "No results", "The query yielded no results, no similar track could be found for " + self.scrobbleData.artist + ' - ' + self.scrobbleData.title);
+		
+		for (var trk in jsonResp.similartracks.track)
 		{	
 			rootTree.navigation.lists[0].items.push({
 				service: 'lastfm',
-				type: 'artist',
-				title: '',
-				artist: jsonResp.similarartists.artist[art].name,
-				albumart: jsonResp.similarartists.artist[art].image[3]['#text'],
-				uri: '',
+				type: 'track',
+				title: jsonResp.similartracks.track[trk].name,
+				artist: jsonResp.similartracks.track[trk].artist.name,
+				mbid: jsonResp.similartracks.track[trk].artist.mbid,
+				albumart: jsonResp.similartracks.track[trk].image[3]['#text'],
+				uri: "search/any/" + jsonResp.similartracks.track[trk].name,
 			});
 		}
 		
@@ -543,7 +551,7 @@ ControllerLastFM.prototype.getSimilarTracks = function(uri) {
 	})
 	.fail(function()
 	{
-		defer.fail(new Error('An error occurred while listing playlists'));
+		defer.reject(new Error('An error occurred while listing playlists'));
 	});
 	
 	return defer.promise;
@@ -553,36 +561,151 @@ ControllerLastFM.prototype.apiCall = function (method, predicate)
 {
 	var self = this;
 	var defer = libQ.defer();
+	var url = 'ws.audioscrobbler.com';
 	
-	/*
-	// method = artist.getsimilar || track.getsimilar
-	// predicate = { artist: '', title: '' };
-	
-	var searchterm = 'artist=' + predicate.artist;
-	if (method == 'track.getsimilar')
-		searchterm += '&track=' + predicate.title;
-	
-	var url = '/2.0/?method=' + method + '&' + searchterm + '&api_key=' + self.config.get('API_KEY') + '&format=json&limit=' + self.config.get('limit');
-	*/
-	
-	http.get({
-			host: 'ws.audioscrobbler.com',
-			port: 80,
-			path: '/2.0/?method=artist.getsimilar&artist=cher&api_key=89e254dbf78f4793aab307c0641019ea&format=json&limit=54'
-		}, function(res) {
-			var body = '';
-			res.on('data', function(chunk) {
-				body += chunk;
-			});
-			res.on('end', function() {
-				defer.resolve(body);
-			});
-		});
+	self.checkURL(url)
+	.then(function (APIStatus)
+	{
+		if(APIStatus)
+		{
+			self.commandRouter.pushToastMessage('info', "Calling LastFM API", "Please standby for results (method: " + method + "), this might take a few seconds.");			
+			if(predicate != undefined && predicate.artist != undefined && predicate.title != undefined)
+			{
+				var query = '';
+				switch(method)
+				{
+					case 'artist.getsimilar':
+						query = '/2.0/?method=artist.getsimilar&artist=' + encodeURIComponent(predicate.artist).trim();
+						break;
+					case 'track.getsimilar':
+						query = '/2.0/?method=track.getsimilar&artist=' + encodeURIComponent(predicate.artist).trim() + '&track=' + encodeURIComponent(predicate.title).trim();
+						break;
+					default:
+						query = 'method = ' + method;
+						break;
+				}
+				
+				self.logger.info('Method: ' + method + ' | query: ' + query);
+				
+				if(self.config.get('enable_debug_logging'))
+					self.logger.info('[LastFM] Trying to call api with method ' + method + ' and predicate: ' + JSON.stringify(predicate));
+				
+				http.get({
+						host: url,
+						port: 80,
+						path: query + '&api_key=' + self.config.get('API_KEY') + '&format=json&limit=54'
+					}, function(res) {
+						var body = '';
+						res.on('data', function(chunk) {
+							body += chunk;
+						});
+						res.on('end', function() {
+							defer.resolve(body);
+						});
+					});
+			}
+			else
+				self.logger.info('[LastFM] Predicate not set, could not populate menu for ' + method);
+		}
+		else
+		{
+			self.commandRouter.pushToastMessage('error', "Calling LastFM API failed", "Could not reach API, please check your connection and/or log files.");	
+			defer.reject();
+		}
+	});
 	
 	return defer.promise;
 };
 
 // Public Methods ---------------------------------------------------------------------------------------
+
+ControllerLastFM.prototype.checkURL = function(url)
+{
+	var self = this;
+	var defer = libQ.defer();
+	try
+	{
+		var options = {method: 'HEAD', host: url, port: 80, path: '/'};
+		var req = http.request(options, function(r) {
+			if(self.config.get('enable_debug_logging'))
+				self.logger.info('[LastFM] URL check (' + url + ') returned code ' + r.statusCode);
+			defer.resolve(true);
+		});
+		req.on('error', function(err) {
+			self.logger.error('[LastFM] Webresource (' + url + ') not available. ' + err);
+			defer.resolve(false);
+		});		
+		req.end();
+	}
+	catch (ex)
+	{
+		self.logger.error('[LastFM] URL availability check finished with error. ' + ex);
+		defer.reject();
+	}
+	
+	return defer.promise;
+};
+
+ControllerLastFM.prototype.fetchArtwork = function(mbid)
+{
+	var self = this;
+	var defer = libQ.defer();
+	var url = 'webservice.fanart.tv';
+	var apikey = '';
+	var options = {host: url, port: 80, path: '/v3/music/' + mbid + '&?api_key=' + apikey + '&format=json'};
+	
+	try
+	{
+		http.get(options, function(res) {
+			var body = '';
+			res.on('data', function(chunk) {
+				body += chunk;
+			});
+			res.on('error', function(err) {
+				self.logger.error('[LastFM] Artwork lookup failed. ' + err);
+			});
+			res.on('end', function() {
+				self.logger.info(body);
+				defer.resolve(body);
+			});
+		});
+	}
+	catch (ex)
+	{
+		self.logger.error('[LastFM] Could not complete artwork lookup. ' + ex);
+		defer.reject();
+	}
+	return defer.promise;
+};
+
+ControllerLastFM.prototype.stopAndStartTimer = function(timerLength, state, scrobbleThresholdInMilliseconds)
+{
+	var self = this;
+	var defer = libQ.defer();
+	
+	try
+	{
+		self.currentTimer.stop();
+		self.currentTimer.start(timerLength, function(scrobbler){
+			if(self.config.get('enable_debug_logging'))
+				self.logger.info('[LastFM] scrobbling from restarted timer.');
+			self.scrobble(state, self.config.get('scrobbleThreshold'), scrobbleThresholdInMilliseconds);
+			self.currentTimer.stop();
+			self.timeToPlay = 0;
+		});		
+		defer.resolve();
+	}
+	catch (ex)
+	{
+		self.logger.error('[LastFM] An error occurred during timer reset; ' + ex);
+		self.logger.info('[LastFM] STATE; ' + JSON.stringify(state));
+		defer.reject();
+	}
+		
+	return defer.promise;
+};
+
+
 
 ControllerLastFM.prototype.updateCredentials = function (data)
 {
@@ -607,10 +730,12 @@ ControllerLastFM.prototype.updateScrobbleSettings = function (data)
 	var self = this;
 	var defer=libQ.defer();
 
+	self.config.set('supportedSongServices', data['supportedSongServices']);
 	self.config.set('scrobbleThreshold', data['scrobbleThreshold'].value);
 	self.config.set('pushToastOnScrobble', data['pushToastOnScrobble']);
-	self.config.set('tryScrobbleWebradio', data['tryScrobbleWebradio']);
-	self.config.set('webradioScrobbleThreshold', data['webradioScrobbleThreshold']);
+	self.config.set('scrobbleFromStream', data['scrobbleFromStream']);
+	self.config.set('supportedStreamingServices', data['supportedStreamingServices']);
+	self.config.set('streamScrobbleThreshold', data['streamScrobbleThreshold']);
 	defer.resolve();
 	
 	self.commandRouter.pushToastMessage('success', "Saved settings", "Successfully saved scrobble settings.");
@@ -631,32 +756,55 @@ ControllerLastFM.prototype.updateDebugSettings = function (data)
 	return defer.promise;
 };
 
+// Scrobble Methods -------------------------------------------------------------------------------------
+
+ControllerLastFM.prototype.formatScrobbleData = function (state)
+{
+	var self = this;
+	var defer = libQ.defer();
+	
+	self.scrobbleData.artist = state.artist;
+	self.scrobbleData.title = state.title
+	self.scrobbleData.album = state.album == null ? '' : state.album
+	
+	if(self.scrobbleData.title != undefined && self.scrobbleData.title.indexOf('-') > -1 && !self.scrobbleData.artist)
+	{	
+		try
+		{
+			var info = state.title.split('-');
+			self.scrobbleData.artist = info[0].trim();
+			self.scrobbleData.title = info[1].trim();
+		}
+		catch (ex)
+		{
+			self.logger.error('[LastFM] An error occurred during parse; ' + ex);
+			self.logger.info('[LastFM] STATE; ' + JSON.stringify(state));
+		}
+	}
+	defer.resolve();
+
+	return defer.promise;
+};
+
 ControllerLastFM.prototype.updateNowPlaying = function (state)
 {
 	var self = this;
 	var defer = libQ.defer();
 	self.updatingNowPlaying = true;
 	
-	var artist = state.artist;
-	var title = state.title;
-	var album = state.album;
+	if(self.config.get('enable_debug_logging'))
+		self.logger.info('[LastFM] Updating now playing');
 	
-	if(state.service == 'webradio' && state.title.indexOf('-') > -1)
-	{
-		var info = state.title.split('-');
-		artist = info[0].trim();
-		title = info[1].trim();
-		album = '';
-	}
+	self.formatScrobbleData(state);
 	
 	if (
 		(self.config.get('API_KEY') != '') &&
 		(self.config.get('API_SECRET') != '') &&
 		(self.config.get('username') != '') &&
 		(self.config.get('authToken') != '') &&
-		artist != undefined &&
-		title != undefined &&
-		album != undefined
+		self.scrobbleData.artist != undefined &&
+		self.scrobbleData.title != undefined &&
+		self.scrobbleData.album != undefined
 	)
 	{
 		if(self.config.get('enable_debug_logging'))
@@ -675,23 +823,23 @@ ControllerLastFM.prototype.updateNowPlaying = function (state)
 					self.logger.info('[LastFM] authenticated successfully!');
 				// Use the last.fm corrections data to check whether the supplied track has a correction to a canonical track
 				lfm.getCorrection({
-					artist: artist,
-					track: title,
+					artist: self.scrobbleData.artist,
+					track: self.scrobbleData.title,
 					callback: function(result) {
 						if(result.success)
 						{
 							// Try to correct the artist
-							if(result.correction.artist.name != undefined && result.correction.artist.name != '' && artist != result.correction.artist.name)
+							if(result.correction.artist.name != undefined && result.correction.artist.name != '' && self.scrobbleData.artist != result.correction.artist.name)
 							{	
-								self.logger.info('[LastFM] corrected artist from: ' + artist + ' to: ' + result.correction.artist.name);
-								artist = result.correction.artist.name;
+								self.logger.info('[LastFM] corrected artist from: ' + self.scrobbleData.artist + ' to: ' + result.correction.artist.name);
+								self.scrobbleData.artist = result.correction.artist.name;
 							}
 							
 							// Try to correct the track title
-							if(result.correction.name != undefined && result.correction.name != '' && title != result.correction.name)
+							if(result.correction.name != undefined && result.correction.name != '' && self.scrobbleData.title != result.correction.name)
 							{	
-								self.logger.info('[LastFM] corrected track title from: ' + title + ' to: ' + result.correction.name);
-								title = result.correction.name;
+								self.logger.info('[LastFM] corrected track title from: ' + self.scrobbleData.title + ' to: ' + result.correction.name);
+								self.scrobbleData.title = result.correction.name;
 							}
 						}
 						else
@@ -701,12 +849,18 @@ ControllerLastFM.prototype.updateNowPlaying = function (state)
 
 				// Used to notify Last.fm that a user has started listening to a track. Parameter names are case sensitive.
 				lfm.scrobbleNowPlayingTrack({
-					artist: artist,
-					track: title,
-					album: album,
+					artist: self.scrobbleData.artist,
+					track: self.scrobbleData.title,
+					album: self.scrobbleData.album,
+					duration: state.duration,
 					callback: function(result) {
 						if(!result.success)
 							console.log("in callback, finished: ", result);
+						else
+						{
+							if(self.config.get('enable_debug_logging'))
+								self.logger.info('[LastFM] updated "now playing" | artist: ' + self.scrobbleData.artist + ' | title: ' + self.scrobbleData.title);
+						}
 					}
 				});
 			} else {
@@ -740,14 +894,35 @@ ControllerLastFM.prototype.scrobble = function (state, scrobbleThreshold, scrobb
 	var now = new Date().getTime();
 	var artist = state.artist;
 	var title = state.title;
-	var album = state.album;
+	var album = state.album == null ? '' : state.album;
 	
-	if(state.service == 'webradio' && state.title.indexOf('-') > -1)
+	if(state.title != undefined && !state.artist && state.title.indexOf(' - ') > -1)
 	{
-		var info = state.title.split('-');
-		artist = info[0].trim();
-		title = info[1].trim();
-		album = '';
+		try
+		{
+			var info = state.title.split('-');
+			artist = info[0].trim();
+			title = info[1].trim();
+		}
+		catch (ex)
+		{
+			self.logger.error('[LastFM] An error occurred during parse; ' + ex);
+			self.logger.info('[LastFM] STATE; ' + JSON.stringify(state));
+		}
+	}
+	else if(state.name != undefined && !state.artist && state.name.indexOf(' - ') > -1)
+	{
+		try
+		{
+			var info = state.name.split('-');
+			artist = info[0].trim();
+			title = info[1].trim();
+		}
+		catch (ex)
+		{
+			self.logger.error('[LastFM] An error occurred during parse; ' + ex);
+			self.logger.info('[LastFM] STATE; ' + JSON.stringify(state));
+		}
 	}
 	
 	if(self.config.get('enable_debug_logging'))
@@ -788,9 +963,7 @@ ControllerLastFM.prototype.scrobble = function (state, scrobbleThreshold, scrobb
 					track: title,
 					callback: function(result) {
 						if(result.success)
-						{
-							//self.logger.info("[LastFM] callback, finished: ", JSON.stringify(result));
-							
+						{							
 							// Try to correct the artist
 							if(result.correction.artist.name != undefined && result.correction.artist.name != '' && artist != result.correction.artist.name)
 							{	
@@ -821,7 +994,7 @@ ControllerLastFM.prototype.scrobble = function (state, scrobbleThreshold, scrobb
 						if(!result.success)
 							console.log("in callback, finished: ", result);
 						
-						if(album == '')
+						if(album == null || album == '')
 							album = '[unknown album]';
 						
 						if(self.config.get('pushToastOnScrobble'))
@@ -877,65 +1050,6 @@ ControllerLastFM.prototype.clearScrobbleMemory = function (remainingtimeToPlay)
 	P R E P A R A T I O N   F O R   F U T U R E   F U N C T I O N A L I T I E S
 
 */
-
-ControllerLastFM.prototype.statePushed = function (timeLeft)
-{
-	timer = setInterval(countdown, 1000);
-	function countdown() {
-	  if (timeLeft == 0) {
-		clearTimeout(timer);
-		// scrobble
-	  } else {
-		timeLeft--;
-	  }
-	}
-}
-
-ControllerLastFM.prototype.getCurrentMac = function () {
-    var self = this;
-    var defer = libQ.defer();
-	var interfaces = os.networkInterfaces();
-	var macs = [];
-	var mac = '';
-	
-	try
-	{
-		//self.logger.info('###### INTERFACES: ' + JSON.stringify(interfaces));
-		for (var inter in interfaces)
-		{
-			if(!interfaces[inter][0].internal)
-			{		
-				// Omit any 'empty' MAC address
-				if (interfaces[inter][0].mac != '00:00:00:00:00:00')
-					macs.push({ interface: inter, mac: interfaces[inter][0].mac });
-			}
-		}
-		
-		// Sort by interface: eth0, eth1, ethx, wlan0, wlan1, wlanx etc.
-		macs.sort(function(a, b){
-			var compA = a.interface.toLowerCase(), compB = b.interface.toLowerCase()
-			if (compA < compB)
-				return -1 
-			if (compA > compB)
-				return 1
-			return 0
-		});
-		
-		//self.logger.info('########################### MACS: ' + JSON.stringify(macs));
-		currentMac = macs[0].mac;
-		self.logger.info('Determined MAC: ' + currentMac);
-		
-		defer.resolve(mac);
-	}
-	catch(e)
-	{
-		self.logger.error('Could not determine MAC address with error: ' + e);
-		defer.reject();
-	}
-	
-    return defer.promise;
-};
-
 
 ControllerLastFM.prototype.generateDependencylist = function ()
 {
