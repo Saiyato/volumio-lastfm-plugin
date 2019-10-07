@@ -743,6 +743,9 @@ ControllerLastFM.prototype.updateScrobbleSettings = function (data)
 	self.config.set('streamScrobbleThreshold', data['streamScrobbleThreshold']);
 	defer.resolve();
 	
+	this.configFile = this.commandRouter.pluginManager.getConfigurationFile(this.context, 'config.json');
+	self.getConf(this.configFile);
+	
 	self.commandRouter.pushToastMessage('success', "Saved settings", "Successfully saved scrobble settings.");
 
 	return defer.promise;
