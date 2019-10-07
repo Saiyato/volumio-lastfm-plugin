@@ -33,7 +33,7 @@
   },
   "scrobbleFromStream": {
     "type": "boolean",
-    "value": false
+    "value": true
   },
   "supportedStreamingServices": {
     "type": "string",
