@@ -82,9 +82,11 @@
 		"saveButton": {
 			"label": "TRANSLATE.LASTFM.SAVE",
 			"data": [
+				"supportedSongServices",
 				"scrobbleThreshold",
 				"pushToastOnScrobble",
 				"scrobbleFromStream",
+				"supportedStreamingServices",
 				"streamScrobbleThreshold"
 			]
 		},

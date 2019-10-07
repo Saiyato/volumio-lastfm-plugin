@@ -56,6 +56,11 @@ ControllerLastFM.prototype.onVolumioStart = function()
 	self.getConf(this.configFile);
 	supportedSongServices = self.config.get('supportedSongServices').split(',');
 	supportedStreamingServices = self.config.get('supportedStreamingServices').split(',');
+	if(self.config.get('enable_debug_logging'))
+	{
+		self.logger.info('[LastFM] supported song services: ' + JSON.stringify(supportedSongServices));
+		self.logger.info('[LastFM] supported streaming services: ' + JSON.stringify(supportedStreamingServices));
+	}
 	
 	self.logger.info('[LastFM] scrobbler initiated!');
 	self.logger.info('[LastFM] extended logging: ' + self.config.get('enable_debug_logging'));
@@ -382,7 +387,7 @@ ControllerLastFM.prototype.browseRoot = function(uri) {
   var self = this;
   self.fTree = [ 
 		{ label: 'Similar Artists', uri: 'similar_artist', icon: 'fa fa-users'},
-		{ label: 'Similar Tracks', uri: 'similar_tracks', icon: 'fa file-audio'}
+		{ label: 'Similar Tracks', uri: 'similar_tracks', icon: 'fa fa-music'}
 	];
   var defer = libQ.defer();
 
@@ -767,13 +772,14 @@ ControllerLastFM.prototype.formatScrobbleData = function (state)
 	self.scrobbleData.title = state.title
 	self.scrobbleData.album = state.album == null ? '' : state.album
 	
-	if(self.scrobbleData.title != undefined && self.scrobbleData.title.indexOf('-') > -1 && !self.scrobbleData.artist)
+	if(((self.scrobbleData.title != undefined && !self.scrobbleData.artist) || supportedStreamingServices.indexOf(state.service) != -1) && self.scrobbleData.title.indexOf('-') > -1 )
 	{	
 		try
 		{
 			var info = state.title.split('-');
 			self.scrobbleData.artist = info[0].trim();
 			self.scrobbleData.title = info[1].trim();
+			self.scrobbleData.album = '';
 		}
 		catch (ex)
 		{
@@ -892,38 +898,7 @@ ControllerLastFM.prototype.scrobble = function (state, scrobbleThreshold, scrobb
 	var defer = libQ.defer();
 	
 	var now = new Date().getTime();
-	var artist = state.artist;
-	var title = state.title;
-	var album = state.album == null ? '' : state.album;
-	
-	if(state.title != undefined && !state.artist && state.title.indexOf(' - ') > -1)
-	{
-		try
-		{
-			var info = state.title.split('-');
-			artist = info[0].trim();
-			title = info[1].trim();
-		}
-		catch (ex)
-		{
-			self.logger.error('[LastFM] An error occurred during parse; ' + ex);
-			self.logger.info('[LastFM] STATE; ' + JSON.stringify(state));
-		}
-	}
-	else if(state.name != undefined && !state.artist && state.name.indexOf(' - ') > -1)
-	{
-		try
-		{
-			var info = state.name.split('-');
-			artist = info[0].trim();
-			title = info[1].trim();
-		}
-		catch (ex)
-		{
-			self.logger.error('[LastFM] An error occurred during parse; ' + ex);
-			self.logger.info('[LastFM] STATE; ' + JSON.stringify(state));
-		}
-	}
+	self.formatScrobbleData(state);
 	
 	if(self.config.get('enable_debug_logging'))
 	{
@@ -936,9 +911,9 @@ ControllerLastFM.prototype.scrobble = function (state, scrobbleThreshold, scrobb
 		(self.config.get('API_SECRET') != '') &&
 		(self.config.get('username') != '') &&
 		(self.config.get('authToken') != '') &&
-		artist != undefined &&
-		title != undefined &&
-		album != undefined	
+		self.scrobbleData.artist != undefined &&
+		self.scrobbleData.title != undefined &&
+		self.scrobbleData.album != undefined	
 	)
 	{
 		if(self.config.get('enable_debug_logging'))
@@ -959,23 +934,23 @@ ControllerLastFM.prototype.scrobble = function (state, scrobbleThreshold, scrobb
 				
 				// Use the last.fm corrections data to check whether the supplied track has a correction to a canonical track
 				lfm.getCorrection({
-					artist: artist,
-					track: title,
+					artist: self.scrobbleData.artist,
+					track: self.scrobbleData.title,
 					callback: function(result) {
 						if(result.success)
 						{							
 							// Try to correct the artist
-							if(result.correction.artist.name != undefined && result.correction.artist.name != '' && artist != result.correction.artist.name)
+							if(result.correction.artist.name != undefined && result.correction.artist.name != '' && self.scrobbleData.artist != result.correction.artist.name)
 							{	
 								self.logger.info('[LastFM] corrected artist from: ' + artist + ' to: ' + result.correction.artist.name);
-								artist = result.correction.artist.name;
+								self.scrobbleData.artist = result.correction.artist.name;
 							}
 							
 							// Try to correct the track title
-							if(result.correction.name != undefined && result.correction.name != '' && title != result.correction.name)
+							if(result.correction.name != undefined && result.correction.name != '' && self.scrobbleData.title != result.correction.name)
 							{	
 								self.logger.info('[LastFM] corrected track title from: ' + title + ' to: ' + result.correction.name);
-								title = result.correction.name;
+								self.scrobbleData.title = result.correction.name;
 							}
 						}
 						else
@@ -987,19 +962,20 @@ ControllerLastFM.prototype.scrobble = function (state, scrobbleThreshold, scrobb
 					self.logger.info('[LastFM] preparing to scrobble...');
 
 				lfm.scrobbleTrack({
-					artist: artist,
-					track: title,
-					album: album,
+					artist: self.scrobbleData.artist,
+					track: self.scrobbleData.title,
+					album: self.scrobbleData.album,
 					callback: function(result) {
 						if(!result.success)
 							console.log("in callback, finished: ", result);
 						
-						if(album == null || album == '')
-							album = '[unknown album]';
+						if(self.scrobbleData.album == undefined || self.scrobbleData.album == '')
+							self.scrobbleData.album = '[unknown album]';
 						
 						if(self.config.get('pushToastOnScrobble'))
-							self.commandRouter.pushToastMessage('success', 'Scrobble succesful', 'Scrobbled: ' + artist + ' - ' + title + ' (' + album + ').');
-						self.logger.info('[LastFM] Scrobble successful for: ' + artist + ' - ' + title + ' (' + album + ').');
+							self.commandRouter.pushToastMessage('success', 'Scrobble succesful', 'Scrobbled: ' + self.scrobbleData.artist + ' - ' + self.scrobbleData.title + ' (' + self.scrobbleData.album + ').');
+						if(self.config.get('enable_debug_logging'))
+							self.logger.info('[LastFM] Scrobble successful for: ' + self.scrobbleData.artist + ' - ' + self.scrobbleData.title + ' (' + self.scrobbleData.album + ').');
 					}
 				});	
 			}
@@ -1009,8 +985,8 @@ ControllerLastFM.prototype.scrobble = function (state, scrobbleThreshold, scrobb
 			}
 		});
 		
-		self.previousScrobble.artist = artist;
-		self.previousScrobble.title = title;
+		self.previousScrobble.artist = self.scrobbleData.artist;
+		self.previousScrobble.title = self.scrobbleData.title;
 		self.clearScrobbleMemory((state.duration * 1000) - scrobbleThresholdInMilliseconds);
 	}
 	else

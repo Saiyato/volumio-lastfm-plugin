@@ -21,7 +21,7 @@
   },
   "supportedSongServices": {
     "type": "string",
-    "value": "mpd,airplay,volspotconnect,volspotconnect2,spop,radio_paradise,80s80s"
+    "value": "mpd,airplay,volspotconnect,volspotconnect2,spop"
   },  
   "scrobbleThreshold": {
     "type": "int",
@@ -37,14 +37,14 @@
   },
   "supportedStreamingServices": {
     "type": "string",
-    "value": "webradio"
+    "value": "webradio,radio_paradise,80s80s"
   },
   "streamScrobbleThreshold": {
     "type": "string",
-    "value": "30"
+    "value": "120"
   },
   "enable_debug_logging": {
     "type": "boolean",
-    "value": true
+    "value": false
   }
 }
