@@ -14,6 +14,7 @@ var os = require('os');
 
 var supportedSongServices; // = ["mpd", "airplay_emulation", "volspotconnect", "volspotconnect2", "spop", "radio_paradise", "80s80s"];
 var supportedStreamingServices; // = ["webradio"];
+var blacklistedServices; // = ['webradio'];
 var scrobbleThresholdSong = 500;  // as fraction of the song duration
 var scrobbleThresholdStream = 60000; // in milliseconds, so this default is 60s
 
@@ -23,8 +24,8 @@ var debugEnabled = false;
 var compositeTitle =
         {
             separator: " - ",
-            indexOfArtist: 1,
-            indexOfTitle: 0
+            indexOfArtist: 0,
+            indexOfTitle: 1
         }
 
 var trackStartTime = 0;
@@ -110,6 +111,9 @@ ControllerLastFM.prototype.onStart = function() {
      // start monitoring the Volumio state to check what song is playing and scrobble it:
     socket.on('pushState', function (state) { self.checkStateUpdate(state); });
 	// self.logger.info('[LastFM] Now it should be: ' + socket.connected); // It's not! Takes a while...
+	
+	// Initialize with the correct settings
+	self.updateCompositeTitleSettings(self.config.get('titleSeparator'), self.config.get('artistFirst'));
     
 	return libQ.resolve();
 };
@@ -741,7 +745,10 @@ ControllerLastFM.prototype.checkStateUpdate = function (state) {
     }
 
     var scrobbleThresholdInMilliseconds = 0;
-    if (supportedSongServices.indexOf(state.service) != -1){
+    // The state object contains enough information to determine if a service is a 'neverending stream'
+	if (state.stream === true)
+        scrobbleThresholdInMilliseconds = scrobbleThresholdStream;
+	else {
         if ((state.duration != null) && (state.duration > 30)){ // Just to make sure it is always defined!
             scrobbleThresholdInMilliseconds = state.duration * scrobbleThresholdSong;
         }
@@ -750,9 +757,7 @@ ControllerLastFM.prototype.checkStateUpdate = function (state) {
             if (debugEnabled)
                 self.logger.info('[LastFM] Undefined track duration or too short for scrobbling: ' + state.duration + ', ' + scrobbleThresholdInMilliseconds);
         }
-    }
-    else if (supportedStreamingServices.indexOf(state.service) != -1)
-        scrobbleThresholdInMilliseconds = scrobbleThresholdStream;
+    }    
 
     if (debugEnabled) {
         self.logger.info('--------------------------------------------------------------------// [LastFM] new state has been pushed; status: ' + state.status + ' | service: ' + state.service + ' | duration: ' + state.duration + ' | title: ' + state.title + ' | previous title: ' + self.previousState.title);
@@ -760,9 +765,8 @@ ControllerLastFM.prototype.checkStateUpdate = function (state) {
             self.logger.info('=================> [timer] is active: ' + self.currentTimer.isActive + ' | can continue: ' + self.currentTimer.canContinue + ' | timer started at: ' + self.currentTimer.timerStarted);
     }
 
-
-    // Scrobble from all services, or at least try to -> improves forward compatibility
-    if (state.status == 'play') 
+    // Scrobble from all services, or at least try to -> improves forward compatibility | I did add blacklist functionality, however ;)
+    if (state.status == 'play' && blacklistedServices.indexOf(state.service) == -1)
 	{
         if (debugEnabled)
             self.logger.info('[LastFM] Playback detected, evaluating parameters for scrobbling...');
@@ -832,7 +836,7 @@ ControllerLastFM.prototype.checkStateUpdate = function (state) {
     else if (state.status == 'pause')
 	{
         if (debugEnabled)
-            self.logger.info('[LastFM] Song has been pause, so also pausing timer.');
+            self.logger.info('[LastFM] Song has been paused, so also pausing timer.');
         if (self.currentTimer.isActive)
             self.timeToPlay = self.currentTimer.pause();
     }
@@ -846,6 +850,10 @@ ControllerLastFM.prototype.checkStateUpdate = function (state) {
         }
         self.timeToPlay = 0;
     }
+	else {
+		if (self.debugEnabled)
+			self.logger.info(`[LastFM] not processing song, because ${state.service} is blacklisted.`);
+	}
 
     // Set state as the new previous state
     // DON'T do this here any more: only update when song is actually playing (because sometimes songs first appear as stopped before starting...
@@ -864,7 +872,7 @@ ControllerLastFM.prototype.formatScrobbleData = function (state)
     var album = state.album == null ? '' : state.album
 
     // Assumes that title is always defined! This is _probably_ true
-    if (!state.artist)  // Artist field empty (often the case for web radio streams)
+    if (!state.artist || (state.stream === true && state.title.includes(compositeTitle.separator)))  // Artist field empty (often the case for streams) or service is a stream and title contains separator (surrounded by spaces)
 	{
         if (state.title.indexOf(compositeTitle.separator) > -1) // Check if the title can be split into artist and actual title:
 		{
