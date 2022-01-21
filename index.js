@@ -12,8 +12,6 @@ var libQ = require('kew');
 var net = require('net');
 var os = require('os');
 
-var supportedSongServices; // = ["mpd", "airplay_emulation", "volspotconnect", "volspotconnect2", "spop", "radio_paradise", "80s80s"];
-var supportedStreamingServices; // = ["webradio"];
 var blacklistedServices; // = ['webradio'];
 var scrobbleThresholdSong = 500;  // as fraction of the song duration
 var scrobbleThresholdStream = 60000; // in milliseconds, so this default is 60s
@@ -163,7 +161,7 @@ ControllerLastFM.prototype.getUIConfig = function() {
 		self.logger.info("1/3 settings loaded");
 		
 		// Scrobble settings
-		uiconf.sections[1].content[0].value = self.config.get('supportedSongServices');
+		uiconf.sections[1].content[0].value = self.config.get('blacklistedServices');
 
 		for (var n = 0; n < uiconf.sections[1].content[1].options.length; n++){			
 			if(uiconf.sections[1].content[1].options[n].value == parseInt(self.config.get('scrobbleThreshold')))
@@ -175,10 +173,9 @@ ControllerLastFM.prototype.getUIConfig = function() {
         //uiconf.sections[1].content[1].value.value = parseInt(self.config.get('scrobbleThreshold'));
 		uiconf.sections[1].content[2].value = self.config.get('pushToastOnScrobble');
 		uiconf.sections[1].content[3].value = self.config.get('scrobbleFromStream');
-		uiconf.sections[1].content[4].value = self.config.get('supportedStreamingServices');
-		uiconf.sections[1].content[5].value = self.config.get('streamScrobbleThreshold');
-		uiconf.sections[1].content[6].value = self.config.get('titleSeparator');
-		uiconf.sections[1].content[7].value = self.config.get('artistFirst');
+		uiconf.sections[1].content[4].value = self.config.get('streamScrobbleThreshold');
+		uiconf.sections[1].content[5].value = self.config.get('titleSeparator');
+		uiconf.sections[1].content[6].value = self.config.get('artistFirst');
 		self.logger.info("2/3 settings loaded");
 		
 		uiconf.sections[2].content[0].value = debugEnabled;
@@ -630,11 +627,10 @@ ControllerLastFM.prototype.updateScrobbleSettings = function (data)
 	var self = this;
 	var defer=libQ.defer();
 
-	self.config.set('supportedSongServices', data['supportedSongServices']);
+	self.config.set('blacklistedServices', data['blacklistedServices']);
 	self.config.set('scrobbleThreshold', data['scrobbleThreshold'].value);
 	self.config.set('pushToastOnScrobble', data['pushToastOnScrobble']);
 	self.config.set('scrobbleFromStream', data['scrobbleFromStream']);
-	self.config.set('supportedStreamingServices', data['supportedStreamingServices']);
 	self.config.set('streamScrobbleThreshold', data['streamScrobbleThreshold']);
 	self.config.set('titleSeparator', data['titleSeparator']);
 	self.config.set('artistFirst', data['artistFirst']);
@@ -691,21 +687,13 @@ ControllerLastFM.prototype.updateCompositeTitleSettings = function (titleSeparat
 ControllerLastFM.prototype.updateServicesSettings = function (data)
 {
 	var self = this;
-    supportedSongServices = data['supportedSongServices'].split(',');
-    supportedSongServices = supportedSongServices.map(function(value) { return value.trim(); }); // trim white spaces
-    if (data['scrobbleFromStream']) {
-        supportedStreamingServices = data['supportedStreamingServices'].split(',');
-        supportedStreamingServices = supportedStreamingServices.map(function(value) { return value.trim(); }); // trim white spaces
-    }
-    else supportedStreamingServices = ['none'];
-
+    blacklistedServices = data['blacklistedServices'].split(',').map(b => b.trim()); // trim white spaces
     scrobbleThresholdSong = data['scrobbleThreshold'].value*10;  // Multiplier for song duration that also performs conversion from s to ms
     scrobbleThresholdStream = data['streamScrobbleThreshold'] * 1000;  // Convert from s to ms
     
     if (debugEnabled)
 	{
-        self.logger.info('[LastFM] supported song services: ' + JSON.stringify(supportedSongServices));
-        self.logger.info('[LastFM] supported streaming services: ' + JSON.stringify(supportedStreamingServices));
+        self.logger.info('[LastFM] blacklisted services: ' + JSON.stringify(blacklistedServices));
         self.logger.info('[LastFM] Threshold values. Song: ' + scrobbleThresholdSong + ', stream: ' + scrobbleThresholdStream);
 	}
 	return libQ.resolve();
@@ -717,11 +705,10 @@ ControllerLastFM.prototype.initScrobbleSettings = function ()
 
     // Get the config settings in a suitable format:
     const data = {
-        'supportedSongServices' : self.config.get('supportedSongServices'),
+        'blacklistedServices' : self.config.get('blacklistedServices'),
         'scrobbleThreshold' : { 'value' : self.config.get('scrobbleThreshold') },
         'pushToastOnScrobble' : self.config.get('pushToastOnScrobble'),
         'scrobbleFromStream' :	self.config.get('scrobbleFromStream'),
-        'supportedStreamingServices' : self.config.get('supportedStreamingServices'),
         'streamScrobbleThreshold' : self.config.get('streamScrobbleThreshold')
     };
     return self.updateServicesSettings(data);
@@ -734,39 +721,45 @@ ControllerLastFM.prototype.checkStateUpdate = function (state) {
     var defer = libQ.defer(); 
 
     // Create the timer object if it does not exist yet
-    if (!self.currentTimer) {
-        self.currentTimer = new pTimer(self.context, debugEnabled);
-        if (debugEnabled)
-            self.logger.info('[LastFM] created new timer object');
-    }
-    else {
-        if (debugEnabled)
-            self.logger.info('[LastFM] using existing timer');
-    }
-
-    var scrobbleThresholdInMilliseconds = 0;
-    // The state object contains enough information to determine if a service is a 'neverending stream'
-	if (state.stream === true)
-        scrobbleThresholdInMilliseconds = scrobbleThresholdStream;
+	if (blacklistedServices.indexOf(state.service) != -1) {
+		if (debugEnabled)
+			self.logger.info(`[LastFM] not processing song, because ${state.service} is blacklisted.`);
+	}
 	else {
-        if ((state.duration != null) && (state.duration > 30)){ // Just to make sure it is always defined!
-            scrobbleThresholdInMilliseconds = state.duration * scrobbleThresholdSong;
-        }
-		else
-        {
-            if (debugEnabled)
-                self.logger.info('[LastFM] Undefined track duration or too short for scrobbling: ' + state.duration + ', ' + scrobbleThresholdInMilliseconds);
-        }
-    }    
+		if (!self.currentTimer) {
+			self.currentTimer = new pTimer(self.context, debugEnabled);
+			if (debugEnabled)
+				self.logger.info('[LastFM] created new timer object');
+		}
+		else {
+			if (debugEnabled)
+				self.logger.info('[LastFM] using existing timer');
+		}
 
-    if (debugEnabled) {
-        self.logger.info('--------------------------------------------------------------------// [LastFM] new state has been pushed; status: ' + state.status + ' | service: ' + state.service + ' | duration: ' + state.duration + ' | title: ' + state.title + ' | previous title: ' + self.previousState.title);
-        if (self.currentTimer)
-            self.logger.info('=================> [timer] is active: ' + self.currentTimer.isActive + ' | can continue: ' + self.currentTimer.canContinue + ' | timer started at: ' + self.currentTimer.timerStarted);
-    }
+		var scrobbleThresholdInMilliseconds = 0;
+		// The state object contains enough information to determine if a service is a 'neverending stream'
+		if (state.stream === true)
+			scrobbleThresholdInMilliseconds = scrobbleThresholdStream;
+		else {
+			if ((state.duration != null) && (state.duration > 30)){ // Just to make sure it is always defined!
+				scrobbleThresholdInMilliseconds = state.duration * scrobbleThresholdSong;
+			}
+			else
+			{
+				if (debugEnabled)
+					self.logger.info('[LastFM] Undefined track duration or too short for scrobbling: ' + state.duration + ', ' + scrobbleThresholdInMilliseconds);
+			}
+		}    
 
+		if (debugEnabled) {
+			self.logger.info('--------------------------------------------------------------------// [LastFM] new state has been pushed; status: ' + state.status + ' | service: ' + state.service + ' | duration: ' + state.duration + ' | title: ' + state.title + ' | previous title: ' + self.previousState.title);
+			if (self.currentTimer)
+				self.logger.info('=================> [timer] is active: ' + self.currentTimer.isActive + ' | can continue: ' + self.currentTimer.canContinue + ' | timer started at: ' + self.currentTimer.timerStarted);
+		}
+	}
+	
     // Scrobble from all services, or at least try to -> improves forward compatibility | I did add blacklist functionality, however ;)
-    if (state.status == 'play' && blacklistedServices.indexOf(state.service) == -1)
+	if (state.status == 'play' && blacklistedServices.indexOf(state.service) == -1)
 	{
         if (debugEnabled)
             self.logger.info('[LastFM] Playback detected, evaluating parameters for scrobbling...');
@@ -850,10 +843,6 @@ ControllerLastFM.prototype.checkStateUpdate = function (state) {
         }
         self.timeToPlay = 0;
     }
-	else {
-		if (self.debugEnabled)
-			self.logger.info(`[LastFM] not processing song, because ${state.service} is blacklisted.`);
-	}
 
     // Set state as the new previous state
     // DON'T do this here any more: only update when song is actually playing (because sometimes songs first appear as stopped before starting...
