@@ -636,11 +636,9 @@ ControllerLastFM.prototype.updateScrobbleSettings = function (data)
 	self.config.set('artistFirst', data['artistFirst']);
 	defer.resolve();
 	
-	//this.configFile = this.commandRouter.pluginManager.getConfigurationFile(this.context, 'config.json');
-	//self.getConf(this.configFile);
-	
     self.updateServicesSettings(data);
     self.updateCompositeTitleSettings(data['titleSeparator'], data['artistFirst']);
+	self.commandRouter.pushToastMessage('info', "Updated configuration", "Scrobble settings have been updated successfully.");
 
 	return defer.promise;
 };
@@ -655,7 +653,6 @@ ControllerLastFM.prototype.updateDebugSettings = function (data)
 	defer.resolve();
 	// for debugging
     self.logger.info('[LastFM] Socket connected? ' + socket.connected);
-
 	self.commandRouter.pushToastMessage('success', "Saved settings", "Successfully saved debug settings.");
 
 	return defer.promise;
