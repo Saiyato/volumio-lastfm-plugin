@@ -916,7 +916,7 @@ ControllerLastFM.prototype.formatScrobbleData = function (state)
 ControllerLastFM.prototype.initLastFMSession = function () {
     var self = this;
 	var defer = libQ.defer();
-    
+    var url = 'ws.audioscrobbler.com';
     var msg = '';
     
     if (
@@ -929,30 +929,36 @@ ControllerLastFM.prototype.initLastFMSession = function () {
         if (debugEnabled)
             self.logger.info('[LastFM] trying to authenticate...');
 
-        self.lfm = new lastfm({
-            api_key: self.config.get('API_KEY'),
-            api_secret: self.config.get('API_SECRET'),
-            username: self.config.get('username'),
-            authToken: self.config.get('authToken')
-        });
-
-        self.lfm.getSessionKey(function (result)
-		{
-            if (result.success)
-			{
-                self.commandRouter.pushToastMessage('success', 'LastFM connection', 'Authenticated successfully with LastFM.');
-                if (debugEnabled)
-                    self.logger.info('[LastFM] authenticated successfully!');
-                defer.resolve('Authenticated successfully!');
-            }
-            else
-			{
-                msg = 'Error: ' + result.error;
-                self.commandRouter.pushToastMessage('error', 'LastFM connection failed', msg);                    
-                self.logger.error('[LastFM] ' + msg); 
-                defer.reject(msg);
-            }
-        });
+		self.checkURL(url)
+			.then(function() {	
+				self.lfm = new lastfm({
+					api_key: self.config.get('API_KEY'),
+					api_secret: self.config.get('API_SECRET'),
+					username: self.config.get('username'),
+					authToken: self.config.get('authToken')
+				});
+		
+				self.lfm.getSessionKey(function (result)
+				{
+					if (result.success)
+					{
+						self.commandRouter.pushToastMessage('success', 'LastFM connection', 'Authenticated successfully with LastFM.');
+						if (debugEnabled)
+							self.logger.info('[LastFM] authenticated successfully!');
+						defer.resolve('Authenticated successfully!');
+					}
+					else
+					{
+						msg = 'Error: ' + result.error;
+						self.commandRouter.pushToastMessage('error', 'LastFM connection failed', msg);                    
+						self.logger.error('[LastFM] ' + msg); 
+						defer.reject(msg);
+					}
+				});
+			})
+			.catch(function() {
+				defer.reject(false);
+			});
     }
     else
 	{
